@@ -1,0 +1,5 @@
+# Example only. This file is not installed and does not enable a schedule.
+# Use a persistent local database and obtain owner confirmation before live collection.
+# The CLI collects and proposes only; it cannot approve or execute CRM writes.
+#
+# 0 7 * * * cd /absolute/path/to/repo && .venv/bin/python -m bellhaven.cli sync --token-file /absolute/private/path/to/token --parent-id VERIFIED_PARENT_ACCOUNT_ID --owner-confirmed-live-test >> /absolute/private/path/to/reconciliation.log 2>&1

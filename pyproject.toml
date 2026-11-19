@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bellhaven-crm-reconciler"
+version = "0.1.0"
+description = "An approval-first local workbench for evidence-based CRM reconciliation."
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.12,<5",
+    "requests>=2.32,<3",
+    "streamlit>=1.67,<2",
+]
+
+[project.scripts]
+bellhaven = "bellhaven.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bellhaven*"]
