@@ -37,7 +37,8 @@ The pipeline makes no LLM calls.
 
 ## What I'd build next
 
+- Outside sources for what the website alone can't settle: state licensing and
+  CMS ownership records to confirm sales, closures, and look-alikes like Union
+  Square, and a trusted listing for phone numbers.
 - A live schedule with alerts.
 - API idempotency keys, so lost writes can be retried safely.
-- Licensing or CMS data to confirm sales and closures.
-- Phone reconciliation once its source of truth is decided.
