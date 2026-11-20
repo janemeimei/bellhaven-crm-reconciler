@@ -30,6 +30,7 @@ def identity_name(value: Any) -> str:
     generic = {
         "bellhaven", "senior", "living", "care", "center", "centre", "community",
         "house", "manor", "healthcare", "rehabilitation", "nursing", "of", "at", "the", "and",
+        "llc", "inc", "ltd",
     }
     return " ".join(word for word in normalize(value).split() if word not in generic)
 
@@ -38,15 +39,28 @@ def street_key(value: Any) -> str:
     aliases = {
         "street": "st", "road": "rd", "avenue": "ave", "boulevard": "blvd",
         "drive": "dr", "lane": "ln", "court": "ct", "highway": "hwy",
+        "parkway": "pkwy", "place": "pl", "circle": "cir", "terrace": "ter",
+        "square": "sq", "trail": "trl", "plaza": "plz", "pike": "pk", "point": "pt",
         "north": "n", "south": "s", "east": "e", "west": "w",
+        "northeast": "ne", "northwest": "nw", "southeast": "se", "southwest": "sw",
         "suite": "unit", "ste": "unit", "apartment": "unit", "apt": "unit",
     }
     return " ".join(aliases.get(word, word) for word in normalize(str(value or "").replace("#", " unit ")).split())
 
 
+def is_po_box(value: Any) -> bool:
+    return bool(re.match(r"(p\s*o|post\s+office)\s*box\b", normalize(value)))
+
+
 def zip_key(value: Any) -> str:
     match = re.fullmatch(r"(\d{5})(?:-\d{4})?", str(value or "").strip())
     return match[1] if match else ""
+
+
+CARE_LABELS = {
+    "assisted": "Assisted Living", "memory": "Memory Care",
+    "nursing": "Skilled Nursing", "independent": "Independent Living",
+}
 
 
 def care_key(value: Any) -> set[str]:
@@ -58,7 +72,17 @@ def care_key(value: Any) -> set[str]:
         result.add("memory")
     if any(word in text for word in ("nursing", "rehab", "skilled")) or text == "snf":
         result.add("nursing")
+    if "independent" in text or text == "il":
+        result.add("independent")
     return result or ({text} if text else set())
+
+
+def crm_care_type(offerings: tuple[str, ...] | list[str]) -> str:
+    # CRM accounts hold one primary care type in CRM vocabulary; the first website offering is primary.
+    if not offerings:
+        return ""
+    keys = care_key(offerings[0])
+    return next((label for key, label in CARE_LABELS.items() if key in keys), offerings[0])
 
 
 def money(account: Account, field: str) -> Decimal:

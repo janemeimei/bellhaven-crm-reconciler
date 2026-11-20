@@ -1,40 +1,43 @@
-# Assessment writeup - working draft
+# Bellhaven CRM reconciliation: writeup
 
-## Approach
+**Result.** 35 website communities, 121 CRM accounts, 25 cases: 24 approved and
+applied, 1 rejected. A fresh rerun proposed nothing new, and the CRM differs from
+its first snapshot only by the approved changes.
 
-I separate current website observations from CRM account and billing history.
-Full-population matching produces evidence-backed relationship groups before
-proposing field changes. A rebrand is not automatically a new facility;
-acquisition is not automatically a duplicate; co-location, splitting, and
-consolidation require identity review.
+## Matching approach
 
-The review workbench presents source facts, related accounts, financial context,
-and exact steps. Both approval and rejection persist. Billing protection uses
-the required AND condition, and uncertain creates are reconciled rather than retried.
+I compare every community with all 121 accounts, not just Bellhaven-named ones,
+because acquisitions and rebrands change names and parents. The address is the
+identity: a normalized street plus the ZIP or city and state. Names only support a
+match, so look-alikes elsewhere are shown as evidence, never matched.
 
-## AI assistance
+- **SOP.** If revenue and AR are both above zero, the old account keeps everything
+  except `chow_current_account`, which points to a new Bellhaven account (Tiffin,
+  Marietta). Otherwise I re-parent directly.
+- **Duplicates.** I keep the copy with the most AR and revenue; the others get
+  `duplicate_of_account`, Inactive, and a note.
+- **Gone from the website** is not proof of a sale, so those accounts get Needs
+  Review and a note, unless exactly one other operator's account has the same
+  address (Sandusky now points to it).
+- **Union Square, rejected.** A same-ZIP look-alike exists under another operator,
+  so no new account until a duplicate is ruled out.
+- Phones are not reconciled; they are outside the requested fields.
 
-AI assisted with requirements interpretation, implementation, synthetic examples,
-and automated checks. The candidate must review the code, understand its decisions,
-and describe the actual live-review work honestly. There are no LLM calls inside
-the pipeline.
+Nothing writes without approval, every write is read back, each refresh verifies
+its reads a second way, and decided cases are never re-proposed.
+`examples/daily.cron` runs the pipeline daily and only proposes.
 
-## Current status and limitations
+## How I used AI tools
 
-This is an offline build with synthetic accounts. Live collection, create/update
-contract verification, actual CRM corrections, and the real demonstration recording
-are not completed. No historical acquisition, split, or consolidation is claimed
-without evidence. Complex relationships that the available scalar pointers cannot
-represent are surfaced instead of fabricated.
+GitHub Copilot, as a coding agent, wrote nearly all the code and tests. I directed
+and checked it: synthetic data first, then read-only against the sandbox, writes
+last. I asked for an independent check of every read and had it proven by
+tampering with reads. I reviewed every case and clicked every decision myself.
+The pipeline makes no LLM calls.
 
-## What I would build next
+## What I'd build next
 
-After owner confirmation: verify live API behavior, connect the same review flow
-to the isolated CRM, and complete evidence-based corrections. Beyond this exercise:
-API-supported conditional writes/idempotency keys, richer historical ownership
-evidence, and clearer representation of genuine split/consolidation relationships.
-
-## Actual time and results
-
-To be completed by the candidate using an honest record of actual work.
-Do not substitute the exercise's approximate two-hour estimate.
+- A live schedule with alerts.
+- API idempotency keys, so lost writes can be retried safely.
+- Licensing or CMS data to confirm sales and closures.
+- Phone reconciliation once its source of truth is decided.

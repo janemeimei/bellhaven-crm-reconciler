@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from typing import Any, Protocol
@@ -19,6 +20,19 @@ class UncertainWrite(CRMError):
     pass
 
 
+class AcknowledgedWrite(UncertainWrite):
+    # A 2xx write whose body is not a recognizable account; the executor's readback decides the outcome.
+    def __init__(self, message: str, shape: str):
+        super().__init__(message)
+        self.shape = shape
+
+
+def response_shape(value: Any) -> str:
+    if isinstance(value, dict):
+        return "object keys: " + ", ".join(sorted(str(key) for key in value)[:12])
+    return type(value).__name__
+
+
 class CRM(Protocol):
     is_live: bool
 
@@ -33,9 +47,11 @@ class DemoCRM:
 
     def __init__(self, store: Store, seed: list[Account] | None = None):
         self.store = store
-        if seed and not store.demo_accounts():
+        if seed:
+            existing = {account["account_id"] for account in store.demo_accounts()}
             for account in seed:
-                store.put_demo_account(account)
+                if account["account_id"] not in existing:
+                    store.put_demo_account(account)
 
     def list_accounts(self) -> list[Account]:
         return self.store.demo_accounts()
@@ -84,6 +100,10 @@ class LiveCRM:
         self._session.trust_env = False
         self._session.headers["Authorization"] = "Bearer " + token
 
+    @property
+    def writes_enabled(self) -> bool:
+        return self._confirmed and self._allow_writes
+
     @staticmethod
     def _account_path(account_id: str) -> str:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", account_id):
@@ -109,12 +129,28 @@ class LiveCRM:
             raise error(f"CRM {method} failed: {type(exc).__name__}. No automatic retry.") from None
         if not 200 <= response.status_code < 300:
             error = UncertainWrite if writing and response.status_code >= 500 else CRMError
-            raise error(f"CRM {method} returned HTTP {response.status_code}. No automatic retry.")
+            raise error(
+                f"CRM {method} returned HTTP {response.status_code}{self._error_detail(response)}. "
+                "No automatic retry."
+            )
         try:
             return response.json()
         except requests.exceptions.JSONDecodeError:
             error = UncertainWrite if writing else CRMError
             raise error("The CRM returned invalid JSON; the operation needs verification.") from None
+
+    def _error_detail(self, response: Any) -> str:
+        # The server's own reason (for example a rejected field) is kept short and never includes the token.
+        try:
+            body = response.json()
+            detail = body.get("detail") or body.get("error") or body.get("message")
+        except (ValueError, AttributeError):
+            return ""
+        if not detail:
+            return ""
+        text = detail if isinstance(detail, str) else json.dumps(detail)
+        token = self._session.headers["Authorization"].removeprefix("Bearer ")
+        return ": " + text.replace(token, "[redacted]")[:300]
 
     @staticmethod
     def _unpack_account(value: Any) -> Account:
@@ -125,13 +161,13 @@ class LiveCRM:
         except ValueError as exc:
             raise CRMError(str(exc)) from exc
 
-    def list_accounts(self) -> list[Account]:
+    def _list(self, filters: dict[str, Any]) -> list[Account]:
         result = []
         seen: set[str] = set()
         expected_total = None
         page = 1
         while True:
-            value = self._request("GET", "/accounts", params={"page": page, "page_size": 50})
+            value = self._request("GET", "/accounts", params={**filters, "page": page, "page_size": 50})
             if not isinstance(value, dict) or not isinstance(value.get("data"), list):
                 raise CRMError("Expected the documented data/page/page_size/total account envelope.")
             if not isinstance(value.get("total"), int) or value["total"] < 0:
@@ -154,6 +190,12 @@ class LiveCRM:
                 raise CRMError("Account pagination ended before its declared total.")
             page += 1
 
+    def list_accounts(self) -> list[Account]:
+        return self._list({})
+
+    def list_children(self, parent_id: str) -> list[Account]:
+        return self._list({"parent_id": parent_id})
+
     def get_account(self, account_id: str) -> Account:
         return self._unpack_account(self._request("GET", self._account_path(account_id)))
 
@@ -162,13 +204,19 @@ class LiveCRM:
         value = self._request("POST", "/accounts", payload=payload)
         try:
             return self._unpack_account(value)
-        except CRMError as exc:
-            raise UncertainWrite("The create response needs read-only reconciliation.") from exc
+        except CRMError:
+            raise AcknowledgedWrite(
+                "The CRM accepted the create, but its response does not identify the account.",
+                response_shape(value),
+            ) from None
 
     def update_account(self, account_id: str, payload: dict[str, Any]) -> Account:
         validate_payload(payload)
         value = self._request("PATCH", self._account_path(account_id), payload=payload)
         try:
             return self._unpack_account(value)
-        except CRMError as exc:
-            raise UncertainWrite("The update response needs read-only reconciliation.") from exc
+        except CRMError:
+            raise AcknowledgedWrite(
+                "The CRM accepted the update, but its response is not an account.",
+                response_shape(value),
+            ) from None

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from bellhaven.crm import CRM, CRMError, UncertainWrite
+from bellhaven.crm import CRM, AcknowledgedWrite, CRMError, UncertainWrite
 from bellhaven.domain import (
     Account, account_snapshot, care_key, normalize, requires_chow, street_key,
     validate_payload, zip_key,
@@ -51,8 +51,12 @@ class Executor:
                 continue
             payload = step["payload"]
             validate_payload(payload)
+            if "parent_id" in payload and (
+                not isinstance(payload["parent_id"], str) or not payload["parent_id"]
+            ):
+                raise ExecutionError("A parent change requires an explicit parent account ID.")
             if operation == "create":
-                if payload.get("parent_id") != proposal.metadata["parent_id"]:
+                if not proposal.metadata.get("parent_id") or payload.get("parent_id") != proposal.metadata["parent_id"]:
                     raise ExecutionError("A new account must use the approved target parent.")
                 continue
             account_id = step["account_id"]
@@ -60,12 +64,12 @@ class Executor:
                 raise ExecutionError("A write is missing its original account snapshot.")
             before = proposal.before[account_id]
             if account_id in protected and set(payload) != {"chow_current_account"}:
-                raise ExecutionError("A CHOW old account may only receive chow_current_account.")
+                raise ExecutionError("The old account in a change of ownership may only receive chow_current_account.")
             if "parent_id" in payload and payload["parent_id"] != before["parent_id"]:
                 if requires_chow(before):
                     raise ExecutionError("The SOP prohibits re-parenting this billing account.")
             if before.get("chow_current_account") and set(payload) != {"chow_current_account"}:
-                raise ExecutionError("Preserve historical CHOW accounts; do not modify their other fields.")
+                raise ExecutionError("Preserve historical change-of-ownership accounts; do not modify their other fields.")
 
     def _expected(
         self, proposal_id: str, revision: int, proposal: Proposal, references: dict[str, str],
@@ -87,7 +91,12 @@ class Executor:
                 raise StaleProposal(
                     f"Account {account_id} changed since review. No further writes were attempted."
                 )
-        self.crm.get_account(proposal.metadata["parent_id"])
+        parent_ids = {
+            step["payload"]["parent_id"] for step in proposal.steps
+            if step["op"] in {"create", "patch"} and "parent_id" in step["payload"]
+        }
+        for parent_id in parent_ids:
+            self.crm.get_account(parent_id)
         for index, step in enumerate(proposal.steps):
             operation = self.store.operation(proposal_id, revision, index)
             if step["op"] != "create" or (operation and operation["state"] == "done"):
@@ -107,7 +116,7 @@ class Executor:
     def _verify(
         self, proposal: Proposal, step: dict[str, Any], account_id: str,
         references: dict[str, str],
-    ) -> None:
+    ) -> Account:
         payload = resolve(step["payload"], references)
         current = self.crm.get_account(account_id)
         if not contains_values(current, payload):
@@ -117,19 +126,19 @@ class Executor:
             expected.update(payload)
             if account_snapshot(current) != expected:
                 raise UncertainWrite("Readback found an unexpected change outside the approved patch.")
+        return current
 
     def _reconcile_step(
         self, proposal: Proposal, step: dict[str, Any], previous: dict[str, Any],
         references: dict[str, str],
-    ) -> str | None:
+    ) -> tuple[str, Account | None]:
         if step["op"] == "bind":
-            return step["account_id"]
+            return step["account_id"], None
         known_id = previous["result"].get("account_id")
         if step["op"] == "patch":
             known_id = step["account_id"]
         if known_id:
-            self._verify(proposal, step, known_id, references)
-            return known_id
+            return known_id, self._verify(proposal, step, known_id, references)
         payload = resolve(step["payload"], references)
         note = payload.get("note", "")
         if "[bh:" not in note:
@@ -143,11 +152,40 @@ class Executor:
                 "Read-only reconciliation did not find exactly one created account. "
                 "The create was not retried."
             )
-        return matches[0]["account_id"]
+        return matches[0]["account_id"], matches[0]
 
-    def apply(self, proposal_id: str) -> str:
-        if self.crm.is_live:
-            raise ExecutionError("Live writes are locked until the owner confirms a later live test.")
+    def _record_change(
+        self, proposal_id: str, revision: int, index: int, proposal: Proposal,
+        step: dict[str, Any], current: Account | None, references: dict[str, str],
+        verifier: str, reason: str,
+    ) -> None:
+        if current is None:
+            return
+        operation = self.store.operation(proposal_id, revision, index)
+        if operation is None:
+            raise ExecutionError("The write has no operation receipt.")
+        before = proposal.before.get(current["account_id"], {})
+        changes = {
+            field: {"before": before.get(field), "after": current.get(field)}
+            for field in resolve(step["payload"], references)
+            if before.get(field) != current.get(field)
+        }
+        self.store.record_event(
+            proposal_id, revision, f"write:{index}",
+            "Account created" if step["op"] == "create" else "Account updated",
+            operation["result"].get("actor") or "Not recorded",
+            {
+                "account_id": current["account_id"], "changes": changes,
+                "crm_updated_at": current.get("updated_at"),
+                "initiated_at": operation["result"].get("started_at"),
+                "verified_by": verifier, "reason": reason,
+            },
+        )
+
+    def apply(self, proposal_id: str, *, actor: str = "Local application") -> str:
+        actor = self.store.checked_actor(actor)
+        if self.crm.is_live and not getattr(self.crm, "writes_enabled", False):
+            raise ExecutionError("Live writes are locked until the owner explicitly enables them.")
         with self.store.execution_lock():
             row = self.store.get_proposal(proposal_id)
             proposal: Proposal = row["proposal"]
@@ -159,6 +197,13 @@ class Executor:
                 raise ExecutionError("Refresh and review this proposal; it is no longer active.")
             self.validate_plan(proposal)
             revision = row["revision"]
+            approvals = [
+                event for event in self.store.case_activity(proposal_id)
+                if event["revision"] == revision and event["event"] == "Approved"
+            ]
+            if not approvals:
+                raise ExecutionError("The approved plan has no decision receipt.")
+            approval_reason = approvals[-1]["details"]["reason"]
             references: dict[str, str] = {}
             for index, step in enumerate(proposal.steps):
                 previous = self.store.operation(proposal_id, revision, index)
@@ -171,30 +216,47 @@ class Executor:
                     if previous and previous["state"] == "done":
                         continue
                     if previous and previous["state"] in {"started", "written", "uncertain"}:
-                        account_id = self._reconcile_step(proposal, step, previous, references)
+                        account_id, current = self._reconcile_step(proposal, step, previous, references)
                         if step["op"] == "create":
                             references[step["ref"]] = account_id
+                        self._record_change(
+                            proposal_id, revision, index, proposal, step, current,
+                            references, actor, approval_reason,
+                        )
                         self.store.record_operation(
                             proposal_id, revision, index, "done", {"account_id": account_id}
                         )
                         continue
                     self._preflight(proposal_id, revision, proposal, references)
-                    self.store.record_operation(proposal_id, revision, index, "started")
+                    self.store.record_operation(proposal_id, revision, index, "started", actor=actor)
                     try:
+                        # The write API's response bodies are undocumented, so readback (not the body) confirms each write.
+                        response: dict[str, str] = {}
                         if step["op"] == "bind":
                             account_id = step["account_id"]
                         elif step["op"] == "create":
-                            account = self.crm.create_account(resolve(step["payload"], references))
-                            account_id = account["account_id"]
+                            try:
+                                account = self.crm.create_account(resolve(step["payload"], references))
+                                account_id = account["account_id"]
+                            except AcknowledgedWrite as exc:
+                                response = {"response_shape": exc.shape}
+                                account_id, _ = self._reconcile_step(proposal, step, {"result": {}}, references)
                             references[step["ref"]] = account_id
                         else:
                             account_id = step["account_id"]
-                            self.crm.update_account(account_id, resolve(step["payload"], references))
+                            try:
+                                self.crm.update_account(account_id, resolve(step["payload"], references))
+                            except AcknowledgedWrite as exc:
+                                response = {"response_shape": exc.shape}
                         self.store.record_operation(
-                            proposal_id, revision, index, "written", {"account_id": account_id}
+                            proposal_id, revision, index, "written", {"account_id": account_id, **response}
                         )
                         if step["op"] != "bind":
-                            self._verify(proposal, step, account_id, references)
+                            current = self._verify(proposal, step, account_id, references)
+                            self._record_change(
+                                proposal_id, revision, index, proposal, step, current,
+                                references, actor, approval_reason,
+                            )
                         self.store.record_operation(
                             proposal_id, revision, index, "done", {"account_id": account_id}
                         )
@@ -213,7 +275,28 @@ class Executor:
                         raise
                 self._preflight(proposal_id, revision, proposal, references)
                 for location_key, target in proposal.metadata.get("bindings", {}).items():
-                    self.store.bind_identity(location_key, resolve(target, references))
+                    account_id = resolve(target, references)
+                    previous_link = self.store.identity_links().get(location_key)
+                    if previous_link != account_id:
+                        self.store.bind_identity(location_key, account_id)
+                        self.store.record_event(
+                            proposal_id, revision, "binding:" + location_key,
+                            "Identity link updated", actor,
+                            {
+                                "location_key": location_key, "before": previous_link,
+                                "after": account_id, "reason": approval_reason,
+                            },
+                        )
+                if proposal.metadata.get("action_type") == "custom":
+                    scope_ids = set(proposal.before) | set(references.values())
+                    scope_ids.update(
+                        account["account_id"] for account in
+                        proposal.evidence.get("accounts", []) + proposal.evidence.get("related_accounts", [])
+                    )
+                    self.store.save_custom_outcome(
+                        proposal_id, revision, proposal,
+                        [self.crm.get_account(account_id) for account_id in sorted(scope_ids)],
+                    )
                 self.store.set_execution(proposal_id, "applied", "Every approved step was read back.")
                 return "Applied and verified against the local synthetic CRM."
             except StaleProposal as exc:

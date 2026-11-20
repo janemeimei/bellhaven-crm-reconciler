@@ -43,6 +43,10 @@ def demo_website() -> WebsiteSnapshot:
         location("campus-south", "Bellhaven Campus South", "606 Campus Way", "Memory Support"),
         location("harbor", "Bellhaven Harbor House", "707 Example Court"),
         location("financial-review", "Bellhaven Aspen House", "808 Example Boulevard"),
+        location("linden", "Bellhaven Linden House", "110 Linden Street"),
+        location("maple", "Bellhaven Maple House", "120 Maple Avenue"),
+        location("spruce", "Bellhaven Spruce House", "130 Spruce Court", "Memory Care"),
+        location("poplar", "Bellhaven Poplar House", "140 Poplar Way"),
     )
     return WebsiteSnapshot(
         locations=locations,
@@ -63,6 +67,8 @@ def demo_website() -> WebsiteSnapshot:
 
 
 def demo_accounts() -> list[Account]:
+    poplar = account("DEMO-POPLAR", "Bellhaven Poplar House", "140 Poplar Way", revenue=7000)
+    poplar.update(status="Inactive", billing_zip="43010")
     return [
         account(PARENT_ID, "Bellhaven Senior Living", parent=""),
         account("DEMO-FORMER", "Former Operator", parent=""),
@@ -76,4 +82,10 @@ def demo_accounts() -> list[Account]:
         account("DEMO-HARBOR", "Bellhaven Harbor House", "707 Example Court"),
         account("DEMO-ASPEN", "Aspen Care", "808 Example Blvd", parent="DEMO-FORMER", revenue=None, ar=100),
         account("DEMO-UNLISTED", "Former Bellhaven Elm House", "909 Example Circle", revenue=2000),
+        account("DEMO-LINDEN", "Bellhaven Linden House", "110 Linden St", revenue=3000),
+        account("DEMO-LINDEN-COPY", "Linden House LLC", "110 Linden Street"),
+        account("DEMO-MAPLE-OLD", "Maple Care Center", "120 Maple Ave", parent="DEMO-FORMER", revenue=62000, ar=1800),
+        account("DEMO-MAPLE", "Bellhaven Maple House", "120 Maple Avenue"),
+        account("DEMO-SPRUCE", "Bellhaven Spruce House", "130 Spruce Ct", revenue=1500),
+        poplar,
     ]
